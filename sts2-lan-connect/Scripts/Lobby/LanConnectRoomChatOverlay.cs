@@ -75,6 +75,23 @@ internal sealed partial class LanConnectRoomChatOverlay : CanvasLayer
 
     public override void _Input(InputEvent inputEvent)
     {
+        if (inputEvent is InputEventKey { Pressed: true, Echo: false, Keycode: Key.F8 })
+        {
+            LanConnectAccessibilityHotkeyRoute route = LanConnectAccessibilityHotkeyRouter.Route(
+                LanConnectAccessibilityHotkey.F8Chat,
+                new LanConnectAccessibilityHotkeyContext(
+                    TextInputHasFocus: GetViewport().GuiGetFocusOwner() is LineEdit,
+                    InviteDialogVisible: false,
+                    ClipboardHasInvite: false,
+                    ChatAvailable: _toggleButton?.Visible == true));
+            if (route.Action == LanConnectAccessibilityHotkeyAction.ToggleChat)
+            {
+                TogglePanel();
+                GetViewport().SetInputAsHandled();
+                return;
+            }
+        }
+
         if (!_dragPointerDown)
         {
             return;

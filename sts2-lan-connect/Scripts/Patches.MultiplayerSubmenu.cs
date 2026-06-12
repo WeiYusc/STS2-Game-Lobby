@@ -190,6 +190,22 @@ internal static class MultiplayerSubmenuPatches
             return;
         }
 
+        try
+        {
+            string clipboardText = DisplayServer.ClipboardGet();
+            LanConnectInviteEntryDecision inviteDecision = LanConnectInviteEntryDecider.Decide(clipboardText);
+            if (inviteDecision.Action == LanConnectInviteEntryAction.ShowInvite)
+            {
+                GD.Print("sts2_lan_connect lobby entry: invite code detected, skipping server picker");
+                overlay.ShowOverlay();
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.Print($"sts2_lan_connect lobby entry: clipboard invite precheck failed -> {ex.Message}");
+        }
+
         LanConnectServerSelectionStartup.Show(
             tree,
             onPicked: _ => overlay.ShowOverlay(),
