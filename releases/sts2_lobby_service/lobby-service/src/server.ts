@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CreateRoomBandwidthGuard } from "./bandwidth-guard.js";
@@ -9,7 +9,6 @@ import { RoomRelayManager } from "./relay.js";
 import { cleanupExpiredRooms } from "./room-cleanup.js";
 import { signServerAdminSession, verifyServerAdminPassword, verifySignedServerAdminSession } from "./server-admin-auth.js";
 import { ServerAdminStateStore } from "./server-admin-state.js";
-import { createServerRegistrySyncService } from "./server-admin-sync.js";
 import { renderServerAdminPage } from "./server-admin-ui.js";
 import {
   LobbyStore,
@@ -30,6 +29,7 @@ import { GossipScheduler } from "./peer/gossip.js";
 import { loadSeedsFromCf } from "./peer/seeds-loader.js";
 import { bootstrapPeers } from "./peer/bootstrap.js";
 import { announceToBootstrappedPeers } from "./peer/auto-announce.js";
+import { mountMetrics } from "./peer/handlers/metrics.js";
 
 const MaxLobbyPlayers = 256;
 const MaxRoomNameLength = 80;
@@ -48,6 +48,9 @@ const MaxSavedRunConnectedNetIds = 16;
 const MaxNetIdLength = 64;
 const MaxCharacterIdLength = 64;
 const MaxCharacterNameLength = 64;
+const lobbyServiceVersion = readLobbyServiceVersion();
+
+type PeerRuntimeState = "disabled" | "unconfigured" | "private" | "joining" | "joined";
 
 const env = {
   host: process.env.HOST ?? "0.0.0.0",
@@ -78,13 +81,10 @@ const env = {
   serverAdminSessionSecret: optionalEnv(process.env.SERVER_ADMIN_SESSION_SECRET),
   serverAdminSessionTtlMs: Number.parseInt(process.env.SERVER_ADMIN_SESSION_TTL_HOURS ?? "168", 10) * 60 * 60 * 1000,
   serverAdminStateFile: process.env.SERVER_ADMIN_STATE_FILE ?? `${process.cwd()}/data/server-admin.json`,
-  serverRegistryBaseUrl: optionalEnv(process.env.SERVER_REGISTRY_BASE_URL) ?? "",
-  serverRegistrySyncIntervalMs: Number.parseInt(process.env.SERVER_REGISTRY_SYNC_INTERVAL_SECONDS ?? "180", 10) * 1000,
-  serverRegistrySyncTimeoutMs: Number.parseInt(process.env.SERVER_REGISTRY_SYNC_TIMEOUT_MS ?? "5000", 10),
-  serverRegistryPublicBaseUrl: process.env.SERVER_REGISTRY_PUBLIC_BASE_URL ?? buildRegistryPublicBaseUrl(),
-  serverRegistryPublicWsUrl: process.env.SERVER_REGISTRY_PUBLIC_WS_URL ?? buildRegistryPublicWsUrl(),
-  serverRegistryBandwidthProbeUrl: process.env.SERVER_REGISTRY_BANDWIDTH_PROBE_URL ?? buildRegistryBandwidthProbeUrl(),
-  serverRegistryProbeFileBytes: Number.parseInt(process.env.SERVER_REGISTRY_PROBE_FILE_BYTES ?? String(100 * 1024 * 1024), 10),
+  // Initial value used when the persisted admin state file does not yet
+  // contain `publicListingEnabled`. The admin panel toggle is the source of
+  // truth at runtime; this only seeds fresh installs.
+  peerPublicListingEnabledDefault: parseBooleanEnv(process.env.PEER_PUBLIC_LISTING_ENABLED, true),
 };
 
 const peerEnv = {
@@ -124,22 +124,20 @@ const relayManager = new RoomRelayManager(
     console.log(`[relay] ${phase} room=${roomId} ${detail}`);
   },
 );
-const serverAdminStateStore = new ServerAdminStateStore(env.serverAdminStateFile);
-const createRoomBandwidthGuard = new CreateRoomBandwidthGuard();
-const serverRegistrySync = createServerRegistrySyncService({
-  env: {
-    registryBaseUrl: env.serverRegistryBaseUrl,
-    timeoutMs: env.serverRegistrySyncTimeoutMs,
-    publicBaseUrl: env.serverRegistryPublicBaseUrl,
-    publicWsUrl: env.serverRegistryPublicWsUrl,
-    bandwidthProbeUrl: env.serverRegistryBandwidthProbeUrl,
-  },
-  stateStore: serverAdminStateStore,
-  getRoomCount: () => store.listRooms().length,
-  getGuardSnapshot: () => getCreateRoomGuardSnapshot(),
+const serverAdminStateStore = new ServerAdminStateStore(env.serverAdminStateFile, {
+  publicListingEnabledDefault: env.peerPublicListingEnabledDefault,
 });
+const createRoomBandwidthGuard = new CreateRoomBandwidthGuard();
 const serverAdminSessions = new Map<string, ServerAdminSession>();
 const createJoinRateLimitHits = new Map<string, RateLimitBucket>();
+let peerStore: PeerStore | null = null;
+
+function requirePeerStore(): PeerStore {
+  if (!peerStore) {
+    throw new Error("peer store is not initialized");
+  }
+  return peerStore;
+}
 
 const app = express();
 app.disable("x-powered-by");
@@ -192,17 +190,6 @@ app.get("/probe", (_req, res) => {
   res.json({
     ok: true,
   });
-});
-
-app.get("/registry/bandwidth-probe.bin", async (_req, res, next) => {
-  try {
-    res.setHeader("content-type", "application/octet-stream");
-    res.setHeader("content-length", String(env.serverRegistryProbeFileBytes));
-    res.setHeader("cache-control", "no-store");
-    await streamZeroBytes(res, env.serverRegistryProbeFileBytes);
-  } catch (error) {
-    next(error);
-  }
 });
 
 app.get("/rooms", (req, res) => {
@@ -416,7 +403,7 @@ app.post("/rooms/:id/connection-events", (req, res, next) => {
 });
 
 app.get("/server-admin", (_req, res) => {
-  res.type("html").send(renderServerAdminPage());
+  res.type("html").send(renderServerAdminPage(lobbyServiceVersion));
 });
 
 app.post("/server-admin/login", (req, res, next) => {
@@ -468,27 +455,7 @@ app.get("/server-admin/session", (req, res, next) => {
 app.get("/server-admin/settings", (req, res, next) => {
   try {
     requireServerAdminSession(req);
-    const guardSnapshot = getCreateRoomGuardSnapshot();
-    const relayTrafficSnapshot = relayManager.getTrafficSnapshot();
-    res.json({
-      ...serverAdminStateStore.getSettingsView(),
-      registryBaseUrl: env.serverRegistryBaseUrl,
-      publicBaseUrl: env.serverRegistryPublicBaseUrl,
-      publicWsUrl: env.serverRegistryPublicWsUrl,
-      bandwidthProbeUrl: env.serverRegistryBandwidthProbeUrl,
-      currentBandwidthMbps: guardSnapshot.currentBandwidthMbps,
-      resolvedCapacityMbps: guardSnapshot.resolvedCapacityMbps,
-      bandwidthUtilizationRatio: guardSnapshot.bandwidthUtilizationRatio,
-      capacitySource: guardSnapshot.capacitySource,
-      createRoomGuardStatus: guardSnapshot.createRoomGuardStatus,
-      createRoomGuardApplies: guardSnapshot.createRoomGuardApplies,
-      createRoomThresholdRatio: guardSnapshot.createRoomThresholdRatio,
-      relayTrafficWindowMs: relayTrafficSnapshot.windowMs,
-      relayTrafficBytesInWindow: relayTrafficSnapshot.totalBytesInWindow,
-      relayActiveRooms: relayTrafficSnapshot.activeRooms,
-      relayActiveHosts: relayTrafficSnapshot.activeHosts,
-      relayActiveClients: relayTrafficSnapshot.activeClients,
-    });
+    res.json(buildServerAdminSettingsResponse());
   } catch (error) {
     next(error);
   }
@@ -509,28 +476,7 @@ app.patch("/server-admin/settings", (req, res, next) => {
       bandwidthCapacityMbps: optionalPositiveNumber(body?.bandwidthCapacityMbps, "bandwidthCapacityMbps", 100_000),
       announcements: body?.announcements,
     });
-    await serverRegistrySync.runNow();
-    const guardSnapshot = getCreateRoomGuardSnapshot();
-    const relayTrafficSnapshot = relayManager.getTrafficSnapshot();
-    res.json({
-      ...settings,
-      registryBaseUrl: env.serverRegistryBaseUrl,
-      publicBaseUrl: env.serverRegistryPublicBaseUrl,
-      publicWsUrl: env.serverRegistryPublicWsUrl,
-      bandwidthProbeUrl: env.serverRegistryBandwidthProbeUrl,
-      currentBandwidthMbps: guardSnapshot.currentBandwidthMbps,
-      resolvedCapacityMbps: guardSnapshot.resolvedCapacityMbps,
-      bandwidthUtilizationRatio: guardSnapshot.bandwidthUtilizationRatio,
-      capacitySource: guardSnapshot.capacitySource,
-      createRoomGuardStatus: guardSnapshot.createRoomGuardStatus,
-      createRoomGuardApplies: guardSnapshot.createRoomGuardApplies,
-      createRoomThresholdRatio: guardSnapshot.createRoomThresholdRatio,
-      relayTrafficWindowMs: relayTrafficSnapshot.windowMs,
-      relayTrafficBytesInWindow: relayTrafficSnapshot.totalBytesInWindow,
-      relayActiveRooms: relayTrafficSnapshot.activeRooms,
-      relayActiveHosts: relayTrafficSnapshot.activeHosts,
-      relayActiveClients: relayTrafficSnapshot.activeClients,
-    });
+    res.json(buildServerAdminSettingsResponse(settings));
   })().catch((error) => {
     next(error);
   });
@@ -737,13 +683,10 @@ const cleanupInterval = setInterval(() => {
     }
   }
 }, 5000);
-const serverRegistrySyncInterval = setInterval(() => {
-  void serverRegistrySync.runNow();
-}, env.serverRegistrySyncIntervalMs);
 
 if (peerEnv.enabled && peerEnv.selfAddress) {
   const identity = await loadOrCreateIdentity(peerEnv.stateDir);
-  const peerStore = new PeerStore(join(peerEnv.stateDir, "peers.json"));
+  peerStore = new PeerStore(join(peerEnv.stateDir, "peers.json"));
   await peerStore.load();
 
   // Resolved at request time so admin panel edits propagate live without a
@@ -776,14 +719,39 @@ if (peerEnv.enabled && peerEnv.selfAddress) {
     source: "self",
   });
 
+  // Resolved at request time so the admin-panel toggle propagates without a
+  // restart. When false, /peers/health still answers (direct-IP joins keep
+  // working) but the field tells the CF aggregator to skip this node.
+  const resolvePublicListing = (): boolean => serverAdminStateStore.getState().publicListingEnabled;
+
   mountHealth(app, {
     identity,
     address: peerEnv.selfAddress,
     getDisplayName: resolvePeerDisplayName,
+    getPublicListing: resolvePublicListing,
   });
   mountList(app, { store: peerStore });
   mountAnnounce(app, { store: peerStore });
   mountHeartbeat(app, { store: peerStore });
+  mountMetrics(app, {
+    identity,
+    address: peerEnv.selfAddress,
+    getDisplayName: resolvePeerDisplayName,
+    getPublicListing: resolvePublicListing,
+    getSnapshot: () => {
+      const guard = getCreateRoomGuardSnapshot();
+      return {
+        rooms: store.listRooms().length,
+        currentBandwidthMbps: guard.currentBandwidthMbps,
+        bandwidthCapacityMbps: guard.bandwidthCapacityMbps,
+        resolvedCapacityMbps: guard.resolvedCapacityMbps,
+        bandwidthUtilizationRatio: guard.bandwidthUtilizationRatio,
+        capacitySource: guard.capacitySource,
+        createRoomGuardApplies: guard.createRoomGuardApplies,
+        createRoomGuardStatus: guard.createRoomGuardStatus,
+      };
+    },
+  });
 
   // Defer bootstrap + auto-announce to AFTER server.listen() succeeds.
   // Load-bearing: if listen() fails (EADDRINUSE, perms, etc.) the process
@@ -797,16 +765,24 @@ if (peerEnv.enabled && peerEnv.selfAddress) {
       void (async () => {
         try {
           const seeds = await loadSeedsFromCf(cfDiscoveryBaseUrl);
-          await bootstrapPeers({ store: peerStore, selfAddress: peerEnv.selfAddress, seeds });
+          await bootstrapPeers({ store: requirePeerStore(), selfAddress: peerEnv.selfAddress, seeds });
+          // Operator opt-in: only announce self to the network when this node
+          // is configured for public visibility. Private nodes still load
+          // seeds (so admins can see the network from their dashboard) but
+          // do not advertise themselves outward.
+          if (!resolvePublicListing()) {
+            console.log("[peer] auto-announce skipped (publicListingEnabled=false)");
+            return;
+          }
           // After bootstrap, push self into every probed peer's announce endpoint
           // so a brand-new lobby becomes discoverable without manual KV ops.
           // Without this, gossip can't propagate self outward (heartbeat only
           // refreshes already-known peers) and the CF aggregator never learns
           // new servers.
-          const announceTargets = peerStore.list().filter((p) => p.address !== peerEnv.selfAddress).length;
+          const announceTargets = requirePeerStore().list().filter((p) => p.address !== peerEnv.selfAddress).length;
           if (announceTargets > 0) {
             await announceToBootstrappedPeers({
-              store: peerStore,
+              store: requirePeerStore(),
               selfAddress: peerEnv.selfAddress,
               selfPublicKey: identity.publicKey,
               selfDisplayName: resolvePeerDisplayName(),
@@ -821,7 +797,7 @@ if (peerEnv.enabled && peerEnv.selfAddress) {
   }
 
   const scheduler = new GossipScheduler({
-    store: peerStore,
+    store: requirePeerStore(),
     selfAddress: peerEnv.selfAddress,
     selfPublicKey: identity.publicKey,
     seedAddresses: [],
@@ -841,9 +817,9 @@ if (peerEnv.enabled && peerEnv.selfAddress) {
   // resolves live, but the local /peers list cache needs an explicit poke.
   setInterval(() => {
     const fresh = resolvePeerDisplayName();
-    const existing = peerStore.get(peerEnv.selfAddress);
+    const existing = requirePeerStore().get(peerEnv.selfAddress);
     if (!existing || existing.displayName === fresh) return;
-    void peerStore.upsert({ ...existing, displayName: fresh, lastSeen: new Date().toISOString() });
+    void requirePeerStore().upsert({ ...existing, displayName: fresh, lastSeen: new Date().toISOString() });
   }, 60_000).unref();
 } else {
   console.log("[peer] disabled (set PEER_SELF_ADDRESS to enable)");
@@ -860,12 +836,8 @@ server.listen(env.port, env.host, () => {
   } else {
     console.log("[server-admin] login disabled until SERVER_ADMIN_PASSWORD_HASH and SERVER_ADMIN_SESSION_SECRET are configured");
   }
-  if (env.serverRegistryBaseUrl) {
-    console.log(`[server-admin] registry sync target ${env.serverRegistryBaseUrl}`);
-    void serverRegistrySync.runNow();
-  } else {
-    console.log("[server-admin] registry sync disabled until SERVER_REGISTRY_BASE_URL is configured");
-  }
+  const listingMode = serverAdminStateStore.getState().publicListingEnabled ? "public" : "private";
+  console.log(`[server-admin] decentralized listing mode: ${listingMode} (toggle via admin panel)`);
 });
 
 function addPeer(peer: ControlPeer) {
@@ -1050,41 +1022,63 @@ function resolveAdvertisedRelayHost(req: Request) {
   }
 }
 
-async function streamZeroBytes(res: Response, totalBytes: number) {
-  const chunk = Buffer.alloc(64 * 1024, 0);
-  let remaining = totalBytes;
-  while (remaining > 0) {
-    const nextLength = Math.min(chunk.length, remaining);
-    const canContinue = res.write(chunk.subarray(0, nextLength));
-    remaining -= nextLength;
-    if (!canContinue) {
-      await once(res, "drain");
-    }
+function buildServerAdminSettingsResponse(settings = serverAdminStateStore.getSettingsView()) {
+  const guardSnapshot = getCreateRoomGuardSnapshot();
+  const relayTrafficSnapshot = relayManager.getTrafficSnapshot();
+  return {
+    ...settings,
+    peerNetworkEnabled: peerEnv.enabled,
+    peerRuntimeState: getPeerRuntimeState(settings.publicListingEnabled),
+    currentBandwidthMbps: guardSnapshot.currentBandwidthMbps,
+    resolvedCapacityMbps: guardSnapshot.resolvedCapacityMbps,
+    bandwidthUtilizationRatio: guardSnapshot.bandwidthUtilizationRatio,
+    capacitySource: guardSnapshot.capacitySource,
+    createRoomGuardStatus: guardSnapshot.createRoomGuardStatus,
+    createRoomGuardApplies: guardSnapshot.createRoomGuardApplies,
+    createRoomThresholdRatio: guardSnapshot.createRoomThresholdRatio,
+    relayTrafficWindowMs: relayTrafficSnapshot.windowMs,
+    relayTrafficBytesInWindow: relayTrafficSnapshot.totalBytesInWindow,
+    relayActiveRooms: relayTrafficSnapshot.activeRooms,
+    relayActiveHosts: relayTrafficSnapshot.activeHosts,
+    relayActiveClients: relayTrafficSnapshot.activeClients,
+  };
+}
+
+function getPeerRuntimeState(publicListingEnabled: boolean): PeerRuntimeState {
+  if (!peerEnv.enabled) {
+    return "disabled";
   }
-  res.end();
+
+  const normalizedSelfAddress = normalizePeerAddressForRuntimeComparison(peerEnv.selfAddress);
+  if (!normalizedSelfAddress) {
+    return "unconfigured";
+  }
+
+  if (!publicListingEnabled) {
+    return "private";
+  }
+
+  const hasExternalActivePeer = peerStore?.list().some((peer) => {
+    return normalizePeerAddressForRuntimeComparison(peer.address) !== normalizedSelfAddress && peer.status === "active";
+  }) ?? false;
+  return hasExternalActivePeer ? "joined" : "joining";
 }
 
-function buildRegistryPublicBaseUrl() {
-  const host = process.env.RELAY_PUBLIC_HOST?.trim()
-    || (process.env.HOST?.trim() && process.env.HOST !== "0.0.0.0" ? process.env.HOST.trim() : "127.0.0.1");
-  const port = process.env.PORT?.trim() || "8787";
-  return `http://${host}:${port}`;
-}
+function normalizePeerAddressForRuntimeComparison(address: string): string {
+  const trimmed = address.trim();
+  if (!trimmed) {
+    return "";
+  }
 
-function buildRegistryPublicWsUrl() {
-  const baseUrl = process.env.SERVER_REGISTRY_PUBLIC_BASE_URL?.trim() || buildRegistryPublicBaseUrl();
   try {
-    const url = new URL(baseUrl);
-    const scheme = url.protocol === "https:" ? "wss:" : "ws:";
-    return `${scheme}//${url.host}/control`;
+    const url = new URL(trimmed);
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString();
   } catch {
-    return "ws://127.0.0.1:8787/control";
+    return trimmed.replace(/\/+$/, "");
   }
-}
-
-function buildRegistryBandwidthProbeUrl() {
-  const baseUrl = process.env.SERVER_REGISTRY_PUBLIC_BASE_URL?.trim() || buildRegistryPublicBaseUrl();
-  return `${baseUrl.replace(/\/+$/, "")}/registry/bandwidth-probe.bin`;
 }
 
 function getCreateRoomGuardSnapshot() {
@@ -1094,7 +1088,12 @@ function getCreateRoomGuardSnapshot() {
     currentBandwidthMbps: relayTrafficSnapshot.currentBandwidthMbps,
     bandwidthCapacityMbps: state.bandwidthCapacityMbps,
     probePeak7dCapacityMbps: state.probePeak7dCapacityMbps,
-    createRoomGuardApplies: Boolean(env.serverRegistryBaseUrl && state.serverId && state.serverToken),
+    // The bandwidth-saturation guard is a courtesy for operators who opted
+    // their node into the public list — it stops them from getting flooded
+    // by random joiners when relay traffic is near capacity. Private nodes
+    // are only joined by people who already know the address, so the guard
+    // would just get in their way.
+    createRoomGuardApplies: state.publicListingEnabled,
   });
 }
 
@@ -1443,7 +1442,7 @@ function toRoomListView(room: ReturnType<LobbyStore["listRooms"]>[number], inclu
     savedRun: room.savedRun
       ? {
           slots: room.savedRun.slots.map((slot) => ({
-            netId: includeSensitiveSavedRun ? slot.netId : "",
+            netId: slot.netId,
             characterId: slot.characterId,
             characterName: slot.characterName,
             playerName: includeSensitiveSavedRun ? slot.playerName : "",
@@ -1476,6 +1475,16 @@ function parseBooleanEnv(value: string | undefined, fallback: boolean) {
   }
 
   throw new Error(`Invalid boolean env value: ${value}`);
+}
+
+function readLobbyServiceVersion() {
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    return typeof parsed.version === "string" && parsed.version.trim().length > 0 ? parsed.version.trim() : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function parseConnectionStrategyEnv(value: string | undefined): ConnectionStrategy {
@@ -1561,7 +1570,6 @@ function shutdown() {
 
 function closeRuntimeResources(onClosed?: () => void) {
   clearInterval(cleanupInterval);
-  clearInterval(serverRegistrySyncInterval);
   wss.close();
   relayManager.close();
   server.close(() => {
