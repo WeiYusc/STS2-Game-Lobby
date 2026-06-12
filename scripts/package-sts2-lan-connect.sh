@@ -58,6 +58,7 @@ verify_package_manifest() {
   require_file "$package_dir/$ASSEMBLY_NAME.dll"
   require_file "$package_dir/$ASSEMBLY_NAME.pck"
   require_file "$package_dir/$MANIFEST_FILE_NAME"
+  require_file "$package_dir/$DEFAULTS_FILE_NAME"
   require_file "$package_dir/README.md"
   require_file "$package_dir/STS2_LAN_CONNECT_USER_GUIDE_ZH.md"
   require_file "$package_dir/install-sts2-lan-connect-macos.sh"
@@ -76,6 +77,7 @@ verify_zip_manifest() {
   [[ "$zip_listing" == *"$ASSEMBLY_NAME/install-sts2-lan-connect-macos.sh"* ]] || die "Release zip is missing install-sts2-lan-connect-macos.sh"
   [[ "$zip_listing" == *"$ASSEMBLY_NAME/install-sts2-lan-connect-macos.command"* ]] || die "Release zip is missing install-sts2-lan-connect-macos.command"
   [[ "$zip_listing" == *"$ASSEMBLY_NAME/$MANIFEST_FILE_NAME"* ]] || die "Release zip is missing $MANIFEST_FILE_NAME"
+  [[ "$zip_listing" == *"$ASSEMBLY_NAME/$DEFAULTS_FILE_NAME"* ]] || die "Release zip is missing $DEFAULTS_FILE_NAME"
 }
 
 clean_release_noise() {
@@ -182,16 +184,12 @@ EOF
 verify_lobby_defaults_runtime_fields() {
   local defaults_path="$1"
 
-  if [[ -z "${STS2_LOBBY_DEFAULT_BASE_URL:-}" ]]; then
-    return
-  fi
-
-  if [[ -n "${STS2_LOBBY_DEFAULT_CF_DISCOVERY_BASE_URL:-}" ]]; then
-    grep -q '"cfDiscoveryBaseUrl"' "$defaults_path" || die "Generated lobby-defaults.json is missing cfDiscoveryBaseUrl"
-  fi
+  grep -q '"baseUrl"' "$defaults_path" || die "Generated lobby-defaults.json is missing baseUrl"
+  grep -q '"cfDiscoveryBaseUrl"[[:space:]]*:[[:space:]]*"https://sts2-gamelobby-register.xyz"' "$defaults_path" || die "Generated lobby-defaults.json is missing public cfDiscoveryBaseUrl"
 
   if [[ -f "${STS2_LOBBY_SEEDS_FILE:-$ROOT_DIR/data/seeds.json}" ]]; then
-    grep -q '"seedPeers"' "$defaults_path" || die "Generated lobby-defaults.json is missing seedPeers"
+    grep -q '"seedPeers"[[:space:]]*:[[:space:]]*\[' "$defaults_path" || die "Generated lobby-defaults.json is missing seedPeers"
+    grep -q 'http://lt.syx2023.icu:52000' "$defaults_path" || die "Generated lobby-defaults.json does not include bundled seed peers"
   fi
 }
 
