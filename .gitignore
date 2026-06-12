@@ -4,6 +4,11 @@ Thumbs.db
 sts2-lan-connect/.godot/
 sts2-lan-connect/build/
 sts2-lan-connect/release/
+sts2-lan-connect.Tests/bin/
+sts2-lan-connect.Tests/obj/
+sts2-lan-connect.GdUnitTests/.godot/
+sts2-lan-connect.GdUnitTests/bin/
+sts2-lan-connect.GdUnitTests/obj/
 
 lobby-service/node_modules/
 lobby-service/dist/
@@ -19,3 +24,6 @@ server-registry/.env
 releases/sts2_peer_sidecar/
 
 .hermes/
+.claude/
+.omx/
+.omo/run-continuation/
