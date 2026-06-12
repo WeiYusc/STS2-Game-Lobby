@@ -1,0 +1,16 @@
+<RunSettings>
+  <RunConfiguration>
+    <MaxCpuCount>1</MaxCpuCount>
+    <TestSessionTimeout>180000</TestSessionTimeout>
+    <TreatNoTestsAsError>true</TreatNoTestsAsError>
+    <EnvironmentVariables>
+      <GODOT_BIN>/Users/mac/Applications/Godot_mono.app/Contents/MacOS/Godot</GODOT_BIN>
+    </EnvironmentVariables>
+  </RunConfiguration>
+  <GdUnit4>
+    <Parameters>"--verbose --headless"</Parameters>
+    <DisplayName>FullyQualifiedName</DisplayName>
+    <CaptureStdOut>true</CaptureStdOut>
+    <CompileProcessTimeout>30000</CompileProcessTimeout>
+  </GdUnit4>
+</RunSettings>

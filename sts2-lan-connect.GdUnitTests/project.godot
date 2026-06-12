@@ -1,0 +1,14 @@
+; Engine configuration file.
+; Minimal project for headless GdUnit4 smoke tests.
+
+config_version=5
+
+[application]
+
+config/name="STS2 LAN Connect GdUnit Tests"
+config/features=PackedStringArray("4.5", "Forward Plus")
+run/main_scene="res://TestMain.tscn"
+
+[dotnet]
+
+project/assembly_name="sts2_lan_connect_gdunit_tests"
