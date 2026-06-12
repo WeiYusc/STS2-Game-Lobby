@@ -267,9 +267,27 @@ export STS2_LOBBY_SEEDS_FILE="$PWD/data/seeds.json"
 
 - 若未显式设置 `STS2_LOBBY_DEFAULT_WS_URL`，打包脚本会根据 `STS2_LOBBY_DEFAULT_BASE_URL` 自动推导
 - 若服务端启用了 `CREATE_ROOM_TOKEN`，客户端打包时的默认值需与服务端 `.env` 保持一致
-- `STS2_LOBBY_DEFAULT_CF_DISCOVERY_BASE_URL` + `STS2_LOBBY_SEEDS_FILE` 决定客户端 picker 默认能看到 CF 聚合列表 + 内置种子
+- `STS2_LOBBY_DEFAULT_CF_DISCOVERY_BASE_URL` + `STS2_LOBBY_SEEDS_FILE` 决定客户端 picker 默认能看到 CF 聚合列表 + 内置种子；公开包应使用 `https://sts2-gamelobby-register.xyz` 和仓库内 `data/seeds.json`
 - `STS2_LOBBY_DEFAULT_REGISTRY_BASE_URL` 在 v0.4.0 客户端里只用于诊断报告字符串，不再用于发起任何 HTTP 请求，**新部署可不设置**
+- 打包脚本会强制检查发布包内存在 `lobby-defaults.json`，且该文件包含公开 CF discovery 地址和内置 seed peers；缺失时会中止打包，避免发出只能连接单一旧默认节点的客户端包
 - 玩家安装 / 卸载说明：[`./CLIENT_RELEASE_README_ZH.md`](./CLIENT_RELEASE_README_ZH.md)
+
+客户端开发验证链路：
+
+```bash
+export PATH="/Users/mac/.dotnet:$PATH"
+export DOTNET_ROOT="/Users/mac/.dotnet"
+
+dotnet test sts2-lan-connect.Tests/sts2_lan_connect.Tests.csproj
+GODOT_BIN="/Users/mac/Applications/Godot_mono.app/Contents/MacOS/Godot" \
+dotnet test sts2-lan-connect.GdUnitTests/sts2_lan_connect.GdUnitTests.csproj \
+  --settings sts2-lan-connect.GdUnitTests/gdunit4.runsettings -m:1
+./scripts/package-sts2-lan-connect.sh
+```
+
+- `sts2-lan-connect.Tests/` 覆盖 Godot-free 逻辑：邀请码入口判定、F7/F8 快捷键路由、中文朗读文案和 `say-the-spire2` 反射签名契约
+- `sts2-lan-connect.GdUnitTests/` 是 Godot 4.5 headless 烟雾测试，当前覆盖房间卡片 focus / 朗读 carrier 行为；运行时可能输出少量 orphan-node warning，只要测试结果为 `0 failed` 即可
+- 根目录 `STS2-Game-Lobby.sln` 纳入三个客户端相关项目，供 IDE / LSP 和 CI 一次性发现
 
 ---
 
@@ -316,8 +334,13 @@ curl http://127.0.0.1:8787/peers/metrics
 2. 公告轮播正常
 3. 搜索、分页、筛选正常
 4. 建房、加房、房间聊天正常
-5. 如使用扩展人数补丁，房间人数元数据与实际配置一致
-6. `复制本地调试报告` 功能可用
+5. 键盘 / 手柄焦点可以遍历搜索、筛选、分页、房间卡片和弹窗；房间卡片按 `Enter` / `Space` / `ui_accept` 可加入
+6. `Esc` 在有弹窗时只关闭弹窗，无弹窗时退出大厅
+7. 复制有效邀请码后进入 `游戏大厅` 会跳过服务器选择器并直接弹出邀请确认；`F7` 可处理剪贴板邀请码或接受当前邀请弹窗
+8. 进入房间后 `F8` 可打开 / 收起房间聊天
+9. 如安装 `say-the-spire2`，房间卡片焦点能朗读中文房间摘要，且不会朗读密码
+10. 如使用扩展人数补丁，房间人数元数据与实际配置一致
+11. `复制本地调试报告` 功能可用
 
 ---
 
@@ -442,6 +465,21 @@ export STS2_LOBBY_SEEDS_FILE="$PWD/data/seeds.json"
 
 > `STS2_LOBBY_DEFAULT_REGISTRY_BASE_URL` is retained only for diagnostic strings in the v0.4.0 client; you do not need to set it for new packaging.
 
+Public client packages should use `https://sts2-gamelobby-register.xyz` and the repository `data/seeds.json`. The packaging script now requires `lobby-defaults.json` in the release package and fails if the public CF discovery URL or bundled seed peers are missing.
+
+Client development checks:
+
+```bash
+dotnet test sts2-lan-connect.Tests/sts2_lan_connect.Tests.csproj
+dotnet test sts2-lan-connect.GdUnitTests/sts2_lan_connect.GdUnitTests.csproj \
+  --settings sts2-lan-connect.GdUnitTests/gdunit4.runsettings -m:1
+./scripts/package-sts2-lan-connect.sh
+```
+
+- `sts2-lan-connect.Tests/` covers Godot-free logic: invite entry decisions, F7/F8 hotkey routing, Chinese announcement text, and the `say-the-spire2` reflection contract.
+- `sts2-lan-connect.GdUnitTests/` is a Godot 4.5 headless smoke-test project for room-card focus and speech-carrier behavior. The adapter may print orphan-node warnings; the gate is `0 failed`.
+- `STS2-Game-Lobby.sln` includes the client mod, xUnit tests, and GdUnit smoke tests for IDE/LSP/CI discovery.
+
 ### Verification
 
 ```bash
@@ -454,6 +492,8 @@ curl http://127.0.0.1:8787/peers/metrics
 ```
 
 `/peers/health` should show `publicListing: true`, `selfAddress` matching your public URL, and `activePeers > 0` once aggregation kicks in (1-2 minutes after first boot).
+
+In game, also verify: lobby refresh, announcements, search/pagination/filtering, create/join/chat, keyboard/controller focus traversal across room cards and dialogs, dialog-first `Esc`, `F7` invite handling, `F8` room chat toggling, `say-the-spire2` room-card announcements if that mod is installed, and `Copy Local Debug Report`.
 
 ### Common triage
 
