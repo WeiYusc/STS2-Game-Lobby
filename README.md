@@ -84,6 +84,16 @@ export STS2_LOBBY_SEEDS_FILE="$PWD/data/seeds.json"
 # 输出：sts2-lan-connect/release/sts2_lan_connect-release.zip
 ```
 
+客户端验证：
+
+```bash
+dotnet test sts2-lan-connect.Tests/sts2_lan_connect.Tests.csproj
+dotnet test sts2-lan-connect.GdUnitTests/sts2_lan_connect.GdUnitTests.csproj \
+  --settings sts2-lan-connect.GdUnitTests/gdunit4.runsettings -m:1
+```
+
+> 公开客户端包必须包含 `lobby-defaults.json`，且其中应带有 `cfDiscoveryBaseUrl=https://sts2-gamelobby-register.xyz` 与 `data/seeds.json` 中的内置种子；`scripts/package-sts2-lan-connect.sh` 会在打包时强制检查这些字段。
+
 #### 大厅服务
 
 **推荐路径：systemd 安装脚本**
@@ -130,6 +140,14 @@ CF 发现入口: https://sts2-gamelobby-register.xyz
 ```
 
 > `http://47.111.146.69:18787`（v0.3.x 的母面板入口）在 v0.4.0 已无运行时角色，仅为兼容旧客户端而保留可达。
+
+### 客户端无障碍与键盘操作
+
+v0.4.0 客户端大厅支持键盘 / 手柄式焦点导航，房间卡片可聚焦，`Enter` / `Space` / `ui_accept` 可对当前房间执行加入操作；`Esc` 优先关闭最上层弹窗，再退出大厅。若检测到 `say-the-spire2` 盲人辅助模组，会通过反射软桥接把大厅焦点交给该模组朗读，不安装该模组时无额外依赖。
+
+- `F7`：剪贴板有有效邀请码时直接弹出加入确认；邀请确认弹窗已打开时执行加入。
+- `F8`：进入房间后切换右上角房间聊天面板。
+- 复制有效邀请码后点击 `游戏大厅` 会跳过服务器选择器，直接进入大厅并显示邀请确认。
 
 ### 文档索引
 
@@ -199,6 +217,16 @@ STS2_LOBBY_SEEDS_FILE="$PWD/data/seeds.json" \
 ./scripts/package-sts2-lan-connect.sh
 ```
 
+**Verify the client MOD**
+
+```bash
+dotnet test sts2-lan-connect.Tests/sts2_lan_connect.Tests.csproj
+dotnet test sts2-lan-connect.GdUnitTests/sts2_lan_connect.GdUnitTests.csproj \
+  --settings sts2-lan-connect.GdUnitTests/gdunit4.runsettings -m:1
+```
+
+Public client packages must include `lobby-defaults.json` with `cfDiscoveryBaseUrl=https://sts2-gamelobby-register.xyz` and bundled seed peers from `data/seeds.json`; `scripts/package-sts2-lan-connect.sh` now fails the package if those runtime defaults are missing.
+
 **Deploy the lobby service (recommended systemd path)**
 
 ```bash
@@ -217,5 +245,13 @@ Default create-room token: Jsp-vspQBS8jI1L0aFshxr-wHZo2dyhSsYGvgh-QI8E
 ```
 
 > The legacy `http://47.111.146.69:18787` registry endpoint has no runtime role in v0.4.0; it is kept reachable only for older clients.
+
+### Client accessibility and keyboard operation
+
+The v0.4.0 client lobby supports keyboard/controller-style focus navigation. Room cards are focusable, `Enter` / `Space` / `ui_accept` joins the focused room, and `Esc` closes the topmost dialog before leaving the lobby. If the `say-the-spire2` accessibility mod is present, the lobby soft-bridges focus announcements to it through reflection; without that mod, no extra dependency is required.
+
+- `F7`: opens the invite confirmation when the clipboard contains a valid invite; accepts the visible invite confirmation when it is already open.
+- `F8`: toggles the room chat panel after joining a room.
+- Copying a valid invite before clicking `Game Lobby` skips the server picker and opens the lobby invite confirmation directly.
 
 For operator details, environment variables, and API reference, go to [`lobby-service/README.md`](./lobby-service/README.md).
